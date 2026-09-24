@@ -1,10 +1,11 @@
-# TypeSafe skill router
+# TypeSafe / Laya skill router
 
 A Hermes Agent plugin that names **the one skill worth loading** — before the model call.
 
 Hermes shows the model a one-line description of every installed skill. With a few hundred of
 them, the model reads past the one that would have done the job. This plugin sends the request
-to [TypeSafe](https://typesafe.ai) (model `jev-latest`) first and, when a skill genuinely fits,
+to either [TypeSafe](https://typesafe.ai) (model `jev-latest`) or a local
+[laya.cpp](https://github.com/lkarlslund/laya.cpp) server first and, when a skill genuinely fits,
 appends a single line to the **user message**:
 
 ```
@@ -21,7 +22,8 @@ failure path — no API key, no roster, timeout, transport error — logs one li
 ## Requirements
 
 - Hermes Agent `>= 0.21`
-- A TypeSafe API key (`TYPESAFE_API_KEY`) — create one at <https://console.typesafe.ai/settings/keys>
+- Either a TypeSafe API key (`TYPESAFE_API_KEY`) — create one at
+  <https://console.typesafe.ai/settings/keys> — or a running local laya.cpp server
 - Python 3.10+. Standard library only: no dependencies to install.
 
 ## Install
@@ -46,6 +48,49 @@ Put the key where Hermes keeps its other secrets:
 echo 'TYPESAFE_API_KEY=ts_...' >> ~/.hermes/.env     # chmod 600
 ```
 
+### Local Laya backend
+
+Run laya.cpp's Jev-compatible HTTP server on its default loopback address, then select it in
+Hermes:
+
+```yaml
+plugins:
+  entries:
+    typesafe-skill-router:
+      settings:
+        backend: laya
+        enabled: true
+```
+
+The plugin defaults to `http://127.0.0.1:8080`, model `laya-latest`, and no authentication.
+Set `base_url` if the server listens elsewhere. If you configured laya.cpp with an API key,
+put `LAYA_API_KEY=...` in `~/.hermes/.env`; the plugin then sends it as a bearer token.
+
+Laya keeps inference local and has no per-request API charge. Its published guidance warns
+that choice accuracy falls as the option count grows, so this plugin never presents it with
+more than 20 options at once. TypeSafe remains the default backend.
+
+### Backend differences
+
+The two servers expose the same `/v1/systemone` shape, but they are not interchangeable in
+operation or calibration:
+
+| | TypeSafe | laya.cpp |
+|---|---|---|
+| `backend` | `typesafe` (default) | `laya` |
+| Default URL | `https://api.typesafe.ai` | `http://127.0.0.1:8080` |
+| Default model | `jev-latest` | `laya-latest` |
+| Authentication | `TYPESAFE_API_KEY` required | none on loopback; optional `LAYA_API_KEY` |
+| Wide-ranking shape | up to 240 skills per chunk | tournament: 19 skills + `none_of_these` per match |
+| Data boundary | request and skill metadata leave the machine | stays local with the default loopback URL |
+| Usage cost | hosted API pricing | no per-request API charge; uses local compute |
+| Thresholds | shipped values were measured with Jev | evaluate separately; Jev thresholds are only starting values |
+
+`model` and `base_url` remain overrides, but an endpoint merely accepting the same JSON does
+not make its probabilities equivalent. Other Jev-compatible/open-weight servers need their
+own documented authentication, choice-cardinality, and threshold profile before being called
+a supported backend.
+
 If Hermes was already running when you installed the plugin, restart that process once so the
 hook is loaded (`hermes gateway restart`, or the service that runs your chat backend). Switching
 it on and off afterwards takes effect immediately.
@@ -57,15 +102,16 @@ Under `plugins.entries.typesafe-skill-router.settings` in `config.yaml` (all opt
 | Setting | Default | What it does |
 |---|---|---|
 | `enabled` | `false` | Master switch. Nothing is sent anywhere until this is true. |
+| `backend` | `typesafe` | `typesafe` for the hosted Jev API, or `laya` for a local laya.cpp server. |
 | `gate` | `0.30` | Mean of the three request judgments. Below it, nothing is suggested and no second request is spent. |
 | `fits` | `0.40` | The winner's own "does this skill do the specific thing asked for" judgment. Below it, nothing is injected. |
 | `fits_margin` | `0.15` | When `fits` prefers a different candidate than the `Choice` winner, it takes over only by leading the winner's own `fits` by this much, clearing `fits` itself, and facing a winner that also clears `fits`. |
 | `shortlist` | `3` | Candidates carried into the second request. |
-| `chunk` | `240` | Skills per request. The API caps a question at 255 options. |
+| `chunk` | `240` | Skills per TypeSafe request. Laya clamps this to 19 skills plus `none_of_these`. |
 | `excerpt` | `700` | Characters of `SKILL.md` shown per shortlisted candidate. |
 | `timeout` | `10.0` | Wall-clock budget for one routing decision. |
 | `suggest_chars` | `4000` | Requests longer than this are left alone. |
-| `model` / `base_url` | `jev-latest` / TypeSafe API | Endpoint overrides. |
+| `model` / `base_url` | backend default | TypeSafe uses `jev-latest` / its hosted API; Laya uses `laya-latest` / `http://127.0.0.1:8080`. |
 | `roster_dir` | `<hermes home>/skills` | Where the roster is read from. |
 | `cache_path` | `<hermes home>/plugins/typesafe-skill-router/cache.json` | Answers are cached by request. |
 | `log_path` | `<hermes home>/logs/typesafe-skill-router.log` | One line per routed turn. |
@@ -80,7 +126,8 @@ English — at `0.40`, the difference between a suggestion and silence.
 
 ## What leaves your machine
 
-Routing is a network call to a third-party service, so here is the whole of it:
+With TypeSafe, routing is a network call to a third-party service. With the default Laya URL,
+the same payload stays on the machine and goes only to the loopback server. In both cases:
 
 - **Sent:** the request text of the current turn, the names and one-line descriptions of your
   installed skills (in chunks of `chunk`), plus — for the top few candidates only — their full
@@ -99,6 +146,11 @@ request**, 3 API calls (2 chunks + the shortlist). Output tokens are not negligi
 independent measurement on a 131-skill roster (single chunk, n=12) came in lower on cost and
 higher on latency: **~$0.0002 per routed turn, p50 1.93 s, max 8.56 s**. Latency is the real
 budget item — it lands on every routed turn.
+
+Laya has no API fee, but it spends more local requests: a bounded tournament reduces the
+roster in several rounds before the final shortlist. Its scores are not calibrated like Jev's;
+the shipped `gate` and `fits` thresholds are starting values and should be evaluated on your
+own requests before relying on them.
 
 The vendor publishes an agent-level effect for the same idea (315 graded turns, block placed in
 the system prompt): wrong skill loads 16.8% → 7.3%, needless loads 9.8% → 4.0%, 37 turns fixed
@@ -130,10 +182,14 @@ can score real turns before anyone tunes a threshold — rather than tuning on v
 
 Two requests, thresholds in code:
 
-1. **Wide.** One `Choice` per chunk of `chunk` skills over the same 60-character index lines the
+1. **Wide.** With TypeSafe, one `Choice` per chunk of `chunk` skills over the same 60-character index lines the
    model sees, each chunk also offering `none_of_these`; plus three `Noul` judgments on the
    request (does it act on the user's own material / does it follow a documented procedure /
    would prose alone satisfy it). The gate is the mean of those three, with the third inverted.
+   With Laya, each match contains at most 19 skills plus `none_of_these`; up to two candidates
+   advance from every qualifying match, and the tournament repeats until at most three remain.
+   The three gate judgments are asked only in the first match, so no request has more than four
+   questions.
 2. **Narrow.** One `Choice` over the top `shortlist` plus `none_of_these`, and one `Noul` per
    candidate: *does this skill do the specific thing the request asks for?*
 

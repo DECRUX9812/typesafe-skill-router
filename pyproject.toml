@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "typesafe-skill-router"
-version = "1.0.0"
-description = "TypeSafe (Jev) skill routing for Hermes Agent: name the one skill worth loading, before the model call."
+version = "1.1.0"
+description = "TypeSafe (Jev) or local Laya skill routing for Hermes Agent."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Ritesh Patel", email = "60716910+DECRUX9812@users.noreply.github.com" }]
-keywords = ["hermes", "plugin", "typesafe", "routing", "skills"]
+keywords = ["hermes", "plugin", "typesafe", "laya", "routing", "skills"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",

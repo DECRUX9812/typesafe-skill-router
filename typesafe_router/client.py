@@ -183,19 +183,26 @@ class SystemOneClient:
         self,
         api_key: str | None = None,
         *,
+        api_key_env: str = "TYPESAFE_API_KEY",
+        require_api_key: bool = True,
         base_url: str | None = None,
         model: str = DEFAULT_MODEL,
         cache: JsonCache | None = None,
+        cache_namespace: str = "",
         offline: bool = False,
         timeout: float = 90.0,
         max_retries: int = 4,
         sleeper=time.sleep,
     ):
         load_env_file()
-        self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY", "").strip()
+        resolved_key = api_key if api_key is not None else os.environ.get(api_key_env, "")
+        self.api_key = str(resolved_key).strip()
+        self.api_key_env = api_key_env
+        self.require_api_key = require_api_key
         self.base_url = (base_url or os.environ.get("TYPESAFE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self.model = model or os.environ.get("TYPESAFE_DEFAULT_MODEL") or DEFAULT_MODEL
         self.cache = cache
+        self.cache_namespace = cache_namespace.strip()
         self.offline = offline
         self.timeout = timeout
         self.max_retries = max_retries
@@ -217,10 +224,14 @@ class SystemOneClient:
         use_cache: bool = True,
     ) -> Response:
         payload = self.build_payload(state, questions, model=model)
+        cache_key = (
+            {"_namespace": self.cache_namespace, "request": payload}
+            if self.cache_namespace else payload
+        )
         offline = self.offline if offline is None else offline
 
         if use_cache and self.cache is not None:
-            cached = self.cache.get(payload)
+            cached = self.cache.get(cache_key)
             if cached is not None:
                 resp = self._parse(cached, payload, cached=True)
                 self.usage.add(Usage(calls=1, cached_calls=1))
@@ -236,7 +247,7 @@ class SystemOneClient:
         raw, latency = self._post(payload)
 
         if use_cache and self.cache is not None:
-            self.cache.put(payload, raw)
+            self.cache.put(cache_key, raw)
 
         resp = self._parse(raw, payload, cached=False)
         resp.latency_s = latency
@@ -270,19 +281,19 @@ class SystemOneClient:
         return json.loads(raw), time.perf_counter() - started
 
     def _request(self, url: str, *, method: str, body: bytes | None) -> str:
-        if not self.api_key:
+        if self.require_api_key and not self.api_key:
             raise MissingAPIKey(
-                "TYPESAFE_API_KEY is not set. Put it in "
-                f"{env_file()} (TYPESAFE_API_KEY=...) or export it. "
-                "Create one at https://console.typesafe.ai/settings/keys",
+                f"{self.api_key_env} is not set. Put it in "
+                f"{env_file()} ({self.api_key_env}=...) or export it.",
                 status=None,
             )
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "typesafe-skill-router/1.0.0",
+            "User-Agent": "typesafe-skill-router/1.1.0",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         attempt = 0
         while True:
             request = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -296,14 +307,16 @@ class SystemOneClient:
                     attempt += 1
                     continue
                 raise SystemOneError(
-                    f"TypeSafe API {exc.code} {exc.reason}: {detail[:400]}", status=exc.code, body=detail
+                    f"System One endpoint {exc.code} {exc.reason}: {detail[:400]}",
+                    status=exc.code,
+                    body=detail,
                 ) from exc
             except urllib.error.URLError as exc:
                 if attempt < self.max_retries:
                     self._sleep(min(2.0 ** attempt, 8.0))
                     attempt += 1
                     continue
-                raise SystemOneError(f"TypeSafe API unreachable: {exc.reason}") from exc
+                raise SystemOneError(f"System One endpoint unreachable: {exc.reason}") from exc
 
     def _parse(self, raw: dict[str, Any], payload: dict[str, Any], *, cached: bool) -> Response:
         answers = {

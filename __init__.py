@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 try:  # Hermes imports this file as a package: ``hermes_plugins.typesafe_skill_router``.
     from .typesafe_router.cache import JsonCache
-    from .typesafe_router.client import SystemOneClient
+    from .typesafe_router.client import SystemOneClient, load_env_file
     from .typesafe_router.roster import Skill, load_roster, skills_root, stats
     from .typesafe_router.router import FITS_MARGIN, FITS_THRESHOLD, GATE_THRESHOLD, suggest
 except ImportError:  # imported as a bare module (tooling that loads __init__.py by path)
@@ -37,17 +37,18 @@ except ImportError:  # imported as a bare module (tooling that loads __init__.py
     if _HERE not in _sys.path:
         _sys.path.insert(0, _HERE)
     from typesafe_router.cache import JsonCache
-    from typesafe_router.client import SystemOneClient
+    from typesafe_router.client import SystemOneClient, load_env_file
     from typesafe_router.roster import Skill, load_roster, skills_root, stats
     from typesafe_router.router import FITS_MARGIN, FITS_THRESHOLD, GATE_THRESHOLD, suggest
 
 PLUGIN_NAME = "typesafe-skill-router"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 
 #: Every setting is optional; these are what a fresh install runs with. Thresholds are the
 #: cookbook's starting points, measured against a live roster before changing them.
 DEFAULTS: Dict[str, Any] = {
     "enabled": False,          # opt-in: nothing is sent anywhere until you turn it on
+    "backend": "typesafe",    # typesafe (hosted) or laya (local laya.cpp server)
     "gate": GATE_THRESHOLD,    # mean of the three request judgments; below -> suggest nothing
     "fits": FITS_THRESHOLD,    # winner's own "does this fit" judgment; below -> nothing
     "fits_margin": FITS_MARGIN,  # lead fits needs over the Choice winner's own to override it
@@ -115,8 +116,12 @@ def _setting(ctx: Any, key: str) -> Any:
 
 
 def _settings(ctx: Any) -> Dict[str, Any]:
+    backend = str(_setting(ctx, "backend") or DEFAULTS["backend"]).strip().lower()
+    if backend not in {"typesafe", "laya"}:
+        raise ValueError("backend must be one of: typesafe, laya")
     return {
         "enabled": _as_bool(_setting(ctx, "enabled"), DEFAULTS["enabled"]),
+        "backend": backend,
         "gate": _as_float(_setting(ctx, "gate"), DEFAULTS["gate"]),
         "fits": _as_float(_setting(ctx, "fits"), DEFAULTS["fits"]),
         "fits_margin": max(0.0, _as_float(_setting(ctx, "fits_margin"), DEFAULTS["fits_margin"])),
@@ -279,19 +284,34 @@ def _roster(ctx: Any) -> List[Skill]:
 
 
 def _client(ctx: Any, settings: Dict[str, Any]) -> SystemOneClient:
+    backend = settings["backend"]
+    if backend == "laya":
+        base_url = settings["base_url"] or "http://127.0.0.1:8080"
+        api_key_env = "LAYA_API_KEY"
+        require_api_key = False
+        model = "laya-latest" if settings["model"] == DEFAULTS["model"] else settings["model"]
+    else:
+        base_url = settings["base_url"] or "https://api.typesafe.ai"
+        api_key_env = "TYPESAFE_API_KEY"
+        require_api_key = True
+        model = settings["model"]
     return SystemOneClient(
-        base_url=settings["base_url"] or None,
-        model=settings["model"],
+        api_key_env=api_key_env,
+        require_api_key=require_api_key,
+        base_url=base_url,
+        model=model,
         cache=JsonCache(cache_path(ctx)),
+        cache_namespace=f"{backend}:{base_url.rstrip('/')}",
         timeout=settings["timeout"],
     )
 
 
-def api_key_present() -> bool:
+def api_key_present(settings: Optional[Dict[str, Any]] = None) -> bool:
+    backend = (settings or {}).get("backend", "typesafe")
+    if backend == "laya":
+        return True  # loopback laya.cpp accepts unauthenticated requests by default
     if os.environ.get("TYPESAFE_API_KEY", "").strip():
         return True
-    from .typesafe_router.client import env_file, load_env_file
-
     load_env_file()
     return bool(os.environ.get("TYPESAFE_API_KEY", "").strip())
 
@@ -310,7 +330,7 @@ def route(ctx: Any, request: str) -> Optional[dict]:
         return None  # slash commands select a skill themselves
     if settings["suggest_chars"] and len(text) > settings["suggest_chars"]:
         return None
-    if not api_key_present():
+    if not api_key_present(settings):
         _notify_once(
             path, "no-key", "skip",
             "TYPESAFE_API_KEY is not set (put it in <hermes home>/.env); staying quiet",
@@ -336,6 +356,7 @@ def route(ctx: Any, request: str) -> Optional[dict]:
             fits_threshold=settings["fits"],
             fits_margin=settings["fits_margin"],
             chunk=settings["chunk"],
+            strategy=settings["backend"],
         ),
     )
     elapsed = time.perf_counter() - started
@@ -365,7 +386,7 @@ def pre_llm_call(user_message: Any = None, **kwargs: Any) -> Optional[dict]:
 def _cli_setup(ctx: Any):
     def setup(parser) -> None:
         sub = parser.add_subparsers(dest="action", metavar="ACTION")
-        sub.add_parser("on", help="turn routing on (sends the request to TypeSafe)")
+        sub.add_parser("on", help="turn routing on (uses the configured backend)")
         sub.add_parser("off", help="turn routing off")
         sub.add_parser("status", help="settings, roster, cache, key")
         one = sub.add_parser("suggest", help="route one request now")
@@ -398,14 +419,23 @@ def _cli_handler(ctx: Any):
             skills = _roster(ctx)
             info = stats(skills) if skills else {"skills": 0, "categories": 0}
             cache = JsonCache(cache_path(ctx))
+            endpoint = (
+                settings["base_url"]
+                or ("http://127.0.0.1:8080" if settings["backend"] == "laya"
+                    else "https://api.typesafe.ai")
+            )
             print(f"{PLUGIN_NAME} {PLUGIN_VERSION}")
             print(f"  enabled   : {settings['enabled']}  ({'on' if settings['enabled'] else 'off'})")
+            print(f"  backend   : {settings['backend']}")
             print(f"  thresholds: gate {settings['gate']:.2f} / fits {settings['fits']:.2f} "
                   f"/ margin {settings['fits_margin']:.2f} / shortlist {settings['shortlist']}")
             print(f"  roster    : {roster_dir(ctx)} — {info['skills']} skills, "
                   f"{info['categories']} categories")
-            print(f"  model     : {settings['model']} @ {settings['base_url'] or 'https://api.typesafe.ai'}")
-            print(f"  api key   : {'present' if api_key_present() else 'MISSING (TYPESAFE_API_KEY)'}")
+            print(f"  model     : {_client(ctx, settings).model} @ {endpoint}")
+            key_label = "optional (LAYA_API_KEY)" if settings["backend"] == "laya" else (
+                "present" if api_key_present(settings) else "MISSING (TYPESAFE_API_KEY)"
+            )
+            print(f"  api key   : {key_label}")
             print(f"  cache     : {cache_path(ctx)} — {len(cache)} cached answers")
             print(f"  log       : {path}")
             print(f"  budget    : {settings['timeout']:.0f}s per turn, "
@@ -422,6 +452,7 @@ def _cli_handler(ctx: Any):
                 shortlist=settings["shortlist"], excerpt=settings["excerpt"],
                 gate_threshold=settings["gate"], fits_threshold=settings["fits"],
                 fits_margin=settings["fits_margin"], chunk=settings["chunk"],
+                strategy=settings["backend"],
             )
             payload = result.as_dict()
             print(json.dumps(payload, separators=(",", ":")) if args.json
@@ -430,7 +461,8 @@ def _cli_handler(ctx: Any):
 
         if action == "check":
             problems = []
-            key = api_key_present()
+            settings = _settings(ctx)
+            key = api_key_present(settings)
             if not key:
                 problems.append("TYPESAFE_API_KEY is not set (<hermes home>/.env)")
             skills = _roster(ctx)
@@ -443,14 +475,13 @@ def _cli_handler(ctx: Any):
             except OSError as exc:
                 problems.append(f"cache dir is not writable: {exc}")
             print(f"  roster  : {len(skills)} skills under {roster_dir(ctx)}")
-            print(f"  api key : {'present' if key else 'MISSING'}")
+            print(f"  backend : {settings['backend']}")
+            print(f"  api key : {'optional' if settings['backend'] == 'laya' else ('present' if key else 'MISSING')}")
             print(f"  cache   : {cache_path(ctx)}")
             print(f"  log     : {log_path(ctx)}")
             if getattr(args, "live", False):
-                from .typesafe_router.client import env_file, load_env_file
-
-                load_env_file(env_file())
-                probe = _client(ctx, _settings(ctx)).probe()
+                load_env_file()
+                probe = _client(ctx, settings).probe()
                 print(f"  live    : model {probe['model']} answered probe "
                       f"{probe['answer']:.3f} ({probe['usage']['cost_usd']} USD)")
             for problem in problems:

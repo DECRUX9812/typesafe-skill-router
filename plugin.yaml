@@ -1,9 +1,9 @@
 name: typesafe-skill-router
-version: 1.0.0
+version: 1.1.0
 description: >-
-  TypeSafe (Jev) skill routing: the request is read before the model call and the one skill
+  TypeSafe (Jev) or local Laya skill routing: the request is read before the model call and the one skill
   from your live roster that fits it is named in a single line on the user message. Says
-  nothing when nothing fits. Stdlib only, about $0.001 per turn.
+  nothing when nothing fits. Stdlib only; local Laya has no API fee.
 author: Ritesh Patel (@DECRUX9812)
 license: MIT
 homepage: https://github.com/DECRUX9812/typesafe-skill-router
@@ -14,16 +14,18 @@ tags:
   - skills
   - hooks
   - typesafe
+  - laya
   - cost-control
 provides_tools: []
 provides_hooks:
   - pre_llm_call
 provides_middleware: []
-requires_env:
-  - TYPESAFE_API_KEY
+requires_env: []
 config_schema:
   enabled:
     type: bool
+  backend:
+    type: str
   gate:
     type: float
   fits:

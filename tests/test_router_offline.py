@@ -12,6 +12,7 @@ from helpers import NONE, roster, scripted_client, skill
 from typesafe_router.router import (
     CHOICE_INSTRUCTIONS,
     CHUNK_CHOICES,
+    LAYA_CHUNK_CHOICES,
     MAX_CHOICES,
     chunk_roster,
     rerank_questions,
@@ -53,6 +54,47 @@ def test_large_roster_is_chunked_with_none_of_these_in_every_chunk():
         ["gate::acts_on_user_system", "gate::would_follow_documented_procedure", "gate::prose_suffices"],
         [],
     ]
+
+
+def test_laya_tournament_keeps_every_choice_at_or_below_twenty_options():
+    client = scripted_client(
+        stage1="skill-499", stage2="skill-499", fits={"skill-499": 0.9}
+    )
+
+    result = suggest(client, "do the thing", roster(500), strategy="laya")
+
+    assert result.skill == "skill-499"
+    assert result.chunks > 25
+    assert len(client.stage1_calls) > 25
+    assert all(len(_criteria(call)) <= 20 for call in client.stage1_calls)
+    assert all(len(call["questions"]) <= 4 for call in client.calls)
+    assert len(result.shortlist) <= 3
+
+
+def test_laya_tournament_clamps_a_larger_configured_chunk():
+    client = scripted_client(
+        stage1="skill-040", stage2="skill-040", fits={"skill-040": 0.9}
+    )
+
+    suggest(client, "do the thing", roster(50), strategy="laya", chunk=240)
+
+    assert all(
+        len(_criteria(call)) - (NONE in _criteria(call)) <= LAYA_CHUNK_CHOICES
+        for call in client.stage1_calls
+    )
+
+
+def test_laya_tournament_caps_a_larger_configured_shortlist():
+    client = scripted_client(
+        stage1="skill-040", stage2="skill-040", fits={"skill-040": 0.9}
+    )
+
+    result = suggest(
+        client, "do the thing", roster(50), strategy="laya", shortlist=10
+    )
+
+    assert len(result.shortlist) <= 3
+    assert all(len(call["questions"]) <= 4 for call in client.calls)
 
 
 def test_chunk_size_above_the_api_cap_is_refused():

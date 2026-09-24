@@ -60,6 +60,7 @@ def test_thresholds_are_the_measured_ones():
     assert module.DEFAULTS["gate"] == pytest.approx(0.30)
     assert module.DEFAULTS["fits"] == pytest.approx(0.40)
     assert module.DEFAULTS["chunk"] <= 255  # the API rejects a Choice over more options
+    assert module.DEFAULTS["backend"] == "typesafe"
 
 
 def test_readme_exists_and_documents_the_privacy_boundary():

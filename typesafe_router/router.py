@@ -47,6 +47,7 @@ FITS_MARGIN = 0.15  # lead the best fits needs over the Choice winner's own to o
 # skills stayed under the cap, so one Choice over the whole roster is not an option here.
 MAX_CHOICES = 255
 CHUNK_CHOICES = 240
+LAYA_CHUNK_CHOICES = 19  # laya.cpp recommends <=20 options; one slot is none_of_these
 NONE_OPTION = "none_of_these"  # per-chunk no-match outcome, only when the roster is chunked
 NONE_THRESHOLD = 0.50  # a chunk whose P(none) is at least this nominates no candidates
 
@@ -192,6 +193,125 @@ def rank_wide(
     }
 
 
+def rank_laya(
+    client: SystemOneClient,
+    request: str,
+    roster: Sequence[Skill],
+    *,
+    recent_context: str = "",
+    chunk: int = LAYA_CHUNK_CHOICES,
+    shortlist: int = SHORTLIST,
+    workers: int = 4,
+) -> dict[str, Any]:
+    """Rank with a bounded tournament suited to laya.cpp's small-choice calibration.
+
+    Laya becomes noticeably less accurate with high-cardinality choices, so every match
+    contains at most 19 skills plus ``none_of_these``. Up to two candidates advance from
+    each qualifying match until no more than ``shortlist`` remain. The gate Nouls ride only
+    the first request, keeping every request at four questions or fewer.
+    """
+    # At least three skills ensures that advancing two candidates makes progress.
+    effective_chunk = min(max(3, chunk), LAYA_CHUNK_CHOICES)
+    target_shortlist = min(max(1, shortlist), SHORTLIST)
+    state = document(request, recent_context)
+    current = list(roster)
+    all_responses: list[Response] = []
+    all_ranked: list[list[tuple[str, float]]] = []
+    all_none_pressure: list[float] = []
+    first_questions: dict[str, dict] | None = None
+    gate_values: dict[str, float] = {}
+
+    while current:
+        groups = chunk_roster(current, effective_chunk)
+        calls: list[dict[str, dict]] = []
+        for group in groups:
+            criteria = {skill.name: skill.index_description for skill in group}
+            criteria[NONE_OPTION] = "None of these skills fit the request."
+            questions: dict[str, dict] = {"which": choice(CHOICE_INSTRUCTIONS, criteria)}
+            if not all_responses and not calls:
+                for key, text in GATE_QUESTIONS.items():
+                    questions[f"gate::{key}"] = noul(text)
+            calls.append(questions)
+        if first_questions is None:
+            first_questions = calls[0]
+
+        if len(calls) == 1:
+            responses = [client.ask(state, calls[0])]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=max(1, min(workers, len(calls)))) as pool:
+                responses = list(pool.map(lambda q: client.ask(state, q), calls))
+
+        round_ranked: list[list[tuple[str, float]]] = []
+        round_none: list[float] = []
+        for response in responses:
+            probabilities = response.answers["which"].probabilities
+            ranked = sorted(
+                ((name, prob) for name, prob in probabilities.items() if name != NONE_OPTION),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+            round_ranked.append(ranked)
+            round_none.append(float(probabilities.get(NONE_OPTION, 0.0)))
+
+        if not gate_values:
+            gate_values = {
+                key.removeprefix("gate::"): answer.noul
+                for key, answer in responses[0].answers.items()
+                if key.startswith("gate::")
+            }
+
+        all_responses.extend(responses)
+        all_ranked.extend(round_ranked)
+        all_none_pressure.extend(round_none)
+
+        qualifying = [i for i, pressure in enumerate(round_none) if pressure < NONE_THRESHOLD]
+        if not qualifying:
+            qualifying = [
+                max(
+                    range(len(round_ranked)),
+                    key=lambda i: round_ranked[i][0][1] if round_ranked[i] else -1.0,
+                )
+            ]
+
+        advanced_names: list[str] = []
+        for index in qualifying:
+            for name, _ in round_ranked[index][:2]:
+                if name not in advanced_names:
+                    advanced_names.append(name)
+
+        if len(advanced_names) <= target_shortlist:
+            finalists = advanced_names
+            break
+        by_name = {skill.name: skill for skill in current}
+        current = [by_name[name] for name in advanced_names]
+    else:
+        finalists = []
+
+    oriented = [
+        (1.0 - value) if key in INVERTED else value
+        for key, value in gate_values.items()
+    ]
+    first = all_responses[0]
+    return {
+        "ranked": sorted(
+            (pair for ranked in all_ranked for pair in ranked),
+            key=lambda kv: (-kv[1], kv[0]),
+        ),
+        "per_chunk": all_ranked,
+        "none_pressure": all_none_pressure,
+        "best_chunk": 0,
+        "shortlist": tuple(finalists[:target_shortlist]),
+        "chunks": len(all_responses),
+        "gate": sum(oriented) / len(oriented),
+        "gate_values": gate_values,
+        "choice_confidence": first.answers["which"].confidence,
+        "response": first,
+        "responses": all_responses,
+        "payload": client.build_payload(state, first_questions or {}),
+    }
+
+
 # -- request 2 ------------------------------------------------------------------
 def rerank_questions(names: Sequence[str], by_name: dict[str, Skill], excerpt: int = EXCERPT_CHARS) -> dict:
     criteria = shortlist_criteria([by_name[n] for n in names], excerpt)
@@ -304,10 +424,14 @@ def suggest(
     recent_context: str = "",
     chunk: int = CHUNK_CHOICES,
     workers: int = 4,
+    strategy: str = "typesafe",
 ) -> Suggestion:
     """Two requests, two thresholds, at most one skill name."""
     by_name = {skill.name: skill for skill in roster}
-    wide = rank_wide(
+    ranker = rank_laya if strategy == "laya" else rank_wide
+    if strategy not in {"typesafe", "laya"}:
+        raise ValueError("strategy must be one of: typesafe, laya")
+    wide = ranker(
         client,
         request,
         roster,
