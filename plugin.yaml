@@ -40,7 +40,7 @@ config_schema:
     type: float
   suggest_chars:
     type: int
-  model:
+  router_model:
     type: str
   base_url:
     type: str

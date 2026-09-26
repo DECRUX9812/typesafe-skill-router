@@ -56,10 +56,10 @@ DEFAULTS: Dict[str, Any] = {
     "excerpt": 700,            # SKILL.md characters each candidate brings
     "timeout": 10.0,           # wall-clock seconds one routing decision may take
     "suggest_chars": 4000,     # longer user messages are left alone
-    "model": "jev-latest",
+    "router_model": "jev-latest",
     "base_url": "",            # default https://api.typesafe.ai
     "roster_dir": "",          # default <hermes home>/skills
-    "cache_path": "",          # default <hermes home>/plugins/<plugin>/cache.json
+    "cache_path": "",          # default <hermes home>/cache/typesafe-skill-router.json
     "log_path": "",            # default <hermes home>/logs/<plugin>.log
 }
 
@@ -125,7 +125,7 @@ def _settings(ctx: Any) -> Dict[str, Any]:
         "excerpt": max(80, _as_int(_setting(ctx, "excerpt"), DEFAULTS["excerpt"])),
         "timeout": max(1.0, _as_float(_setting(ctx, "timeout"), DEFAULTS["timeout"])),
         "suggest_chars": max(0, _as_int(_setting(ctx, "suggest_chars"), DEFAULTS["suggest_chars"])),
-        "model": str(_setting(ctx, "model") or DEFAULTS["model"]),
+        "model": str(_setting(ctx, "router_model") or DEFAULTS["router_model"]),
         "base_url": str(_setting(ctx, "base_url") or ""),
         "roster_dir": str(_setting(ctx, "roster_dir") or ""),
         "cache_path": str(_setting(ctx, "cache_path") or ""),
@@ -133,13 +133,9 @@ def _settings(ctx: Any) -> Dict[str, Any]:
     }
 
 
-def _state_dir() -> Path:
-    return hermes_home() / "plugins" / PLUGIN_NAME
-
-
 def cache_path(ctx: Any) -> Path:
     configured = _settings(ctx)["cache_path"]
-    return Path(configured).expanduser() if configured else _state_dir() / "cache.json"
+    return Path(configured).expanduser() if configured else hermes_home() / "cache" / f"{PLUGIN_NAME}.json"
 
 
 def log_path(ctx: Any) -> Path:

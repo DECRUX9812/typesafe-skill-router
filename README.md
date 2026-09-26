@@ -65,10 +65,18 @@ Under `plugins.entries.typesafe-skill-router.settings` in `config.yaml` (all opt
 | `excerpt` | `700` | Characters of `SKILL.md` shown per shortlisted candidate. |
 | `timeout` | `10.0` | Wall-clock budget for one routing decision. |
 | `suggest_chars` | `4000` | Requests longer than this are left alone. |
-| `model` / `base_url` | `jev-latest` / TypeSafe API | Endpoint overrides. |
+| `router_model` / `base_url` | `jev-latest` / TypeSafe API | Endpoint overrides (`model` is reserved by Hermes for core settings). |
 | `roster_dir` | `<hermes home>/skills` | Where the roster is read from. |
-| `cache_path` | `<hermes home>/plugins/typesafe-skill-router/cache.json` | Answers are cached by request. |
+| `cache_path` | `<hermes home>/cache/typesafe-skill-router.json` | Answers are cached outside the buildable plugin tree so cache writes do not invalidate Hermes's dependency stamp. |
 | `log_path` | `<hermes home>/logs/typesafe-skill-router.log` | One line per routed turn. |
+
+When upgrading, rename a configured `model` setting to `router_model`; Hermes reserves the
+plugin-relative `model` root, so older versions could not read it. The default cache path
+also changes without automatically migrating old answers. To keep cached answers (and
+avoid paying for those requests again), stop active router processes and copy the old
+`<hermes home>/plugins/typesafe-skill-router/cache.json` to the new default path before
+restarting. Do not keep using the old path as `cache_path` on a buildable plugin: cache
+writes there invalidate Hermes's dependency stamp and can trigger repeated rebuilds.
 
 Thresholds live in code, and the answers are cached, so re-tuning them costs nothing: change a
 number, replay the same requests, compare. Slash commands are never routed, and multi-part

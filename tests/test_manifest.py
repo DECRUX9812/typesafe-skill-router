@@ -49,6 +49,35 @@ def test_config_schema_covers_exactly_the_settings_the_code_reads():
     assert set(MANIFEST["config_schema"]) == set(module.DEFAULTS)
 
 
+def test_model_setting_uses_plugin_relative_non_reserved_key():
+    module = plugin_module()
+
+    class StrictContext:
+        def get_config(self, key, default=None):
+            if key == "model":
+                raise ValueError("reserved core setting")
+            return "jev-test" if key == "router_model" else default
+
+    assert module._settings(StrictContext())["model"] == "jev-test"
+
+
+def test_default_cache_stays_outside_buildable_plugin_directory(tmp_path, monkeypatch):
+    module = plugin_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert module.cache_path(StubContext({})) == tmp_path / "cache" / "typesafe-skill-router.json"
+
+
+def test_explicit_cache_and_router_model_reach_client(tmp_path):
+    module = plugin_module()
+    explicit = tmp_path / "custom-cache.json"
+    ctx = StubContext({"router_model": "jev-custom", "cache_path": str(explicit)})
+    settings = module._settings(ctx)
+    client = module._client(ctx, settings)
+    assert client.model == "jev-custom"
+    assert module.cache_path(ctx) == explicit
+    assert client.cache.path == explicit
+
+
 def test_routing_is_opt_in_by_default():
     """Installing must not send anything anywhere until the user turns it on."""
     module = plugin_module()
