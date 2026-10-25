@@ -65,7 +65,7 @@ Under `plugins.entries.typesafe-skill-router.settings` in `config.yaml` (all opt
 | `excerpt` | `700` | Characters of `SKILL.md` shown per shortlisted candidate. |
 | `timeout` | `10.0` | Wall-clock budget for one routing decision. |
 | `suggest_chars` | `4000` | Requests longer than this are left alone. |
-| `model` / `base_url` | `jev-latest` / TypeSafe API | Endpoint overrides. |
+| `jev_model` / `base_url` | `jev-latest` / TypeSafe API | Endpoint overrides (`jev_model` because Hermes reserves the `model` settings key). |
 | `roster_dir` | `<hermes home>/skills` | Where the roster is read from. |
 | `cache_path` | `<hermes home>/plugins/typesafe-skill-router/cache.json` | Answers are cached by request. |
 | `log_path` | `<hermes home>/logs/typesafe-skill-router.log` | One line per routed turn. |

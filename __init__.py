@@ -56,7 +56,8 @@ DEFAULTS: Dict[str, Any] = {
     "excerpt": 700,            # SKILL.md characters each candidate brings
     "timeout": 10.0,           # wall-clock seconds one routing decision may take
     "suggest_chars": 4000,     # longer user messages are left alone
-    "model": "jev-latest",
+    # Named jev_model because Hermes reserves the `model` plugin-settings root.
+    "jev_model": "jev-latest",
     "base_url": "",            # default https://api.typesafe.ai
     "roster_dir": "",          # default <hermes home>/skills
     "cache_path": "",          # default <hermes home>/plugins/<plugin>/cache.json
@@ -125,7 +126,7 @@ def _settings(ctx: Any) -> Dict[str, Any]:
         "excerpt": max(80, _as_int(_setting(ctx, "excerpt"), DEFAULTS["excerpt"])),
         "timeout": max(1.0, _as_float(_setting(ctx, "timeout"), DEFAULTS["timeout"])),
         "suggest_chars": max(0, _as_int(_setting(ctx, "suggest_chars"), DEFAULTS["suggest_chars"])),
-        "model": str(_setting(ctx, "model") or DEFAULTS["model"]),
+        "jev_model": str(_setting(ctx, "jev_model") or DEFAULTS["jev_model"]),
         "base_url": str(_setting(ctx, "base_url") or ""),
         "roster_dir": str(_setting(ctx, "roster_dir") or ""),
         "cache_path": str(_setting(ctx, "cache_path") or ""),
@@ -137,18 +138,18 @@ def _state_dir() -> Path:
     return hermes_home() / "plugins" / PLUGIN_NAME
 
 
-def cache_path(ctx: Any) -> Path:
-    configured = _settings(ctx)["cache_path"]
+def cache_path(ctx: Any, settings: Optional[Dict[str, Any]] = None) -> Path:
+    configured = (settings or _settings(ctx))["cache_path"]
     return Path(configured).expanduser() if configured else _state_dir() / "cache.json"
 
 
-def log_path(ctx: Any) -> Path:
-    configured = _settings(ctx)["log_path"]
+def log_path(ctx: Any, settings: Optional[Dict[str, Any]] = None) -> Path:
+    configured = (settings or _settings(ctx))["log_path"]
     return Path(configured).expanduser() if configured else hermes_home() / "logs" / f"{PLUGIN_NAME}.log"
 
 
-def roster_dir(ctx: Any) -> Path:
-    configured = _settings(ctx)["roster_dir"]
+def roster_dir(ctx: Any, settings: Optional[Dict[str, Any]] = None) -> Path:
+    configured = (settings or _settings(ctx))["roster_dir"]
     return Path(configured).expanduser() if configured else skills_root()
 
 
@@ -258,12 +259,12 @@ def _disabled_skill_names() -> "set[str]":
         return set()
 
 
-def _roster(ctx: Any) -> List[Skill]:
+def _roster(ctx: Any, settings: Optional[Dict[str, Any]] = None) -> List[Skill]:
     """The live roster. The directory scan is cached for ``_ROSTER_TTL`` seconds
     (installs change under us), but the disabled-skill filter runs on every call —
     the cache key is only the directory, while the filtered result also depends on
     config.yaml and the session platform, both mutable inside the TTL."""
-    directory = roster_dir(ctx)
+    directory = roster_dir(ctx, settings)
     key = str(directory)
     now = time.time()
     with _roster_lock:
@@ -281,8 +282,8 @@ def _roster(ctx: Any) -> List[Skill]:
 def _client(ctx: Any, settings: Dict[str, Any]) -> SystemOneClient:
     return SystemOneClient(
         base_url=settings["base_url"] or None,
-        model=settings["model"],
-        cache=JsonCache(cache_path(ctx)),
+        model=settings["jev_model"],
+        cache=JsonCache(cache_path(ctx, settings)),
         timeout=settings["timeout"],
     )
 
@@ -299,10 +300,10 @@ def api_key_present() -> bool:
 # ─── the hook ────────────────────────────────────────────────────────────────
 def route(ctx: Any, request: str) -> Optional[dict]:
     """One routing decision. Returns the block to inject, or ``None`` for silence."""
-    settings = _settings(ctx)
-    path = log_path(ctx)
-    if not settings["enabled"]:
+    if not _as_bool(_setting(ctx, "enabled"), DEFAULTS["enabled"]):
         return None
+    settings = _settings(ctx)
+    path = log_path(ctx, settings)
     if not isinstance(request, str):
         return None  # multimodal content parts: not a routing question
     text = request.strip()
@@ -317,9 +318,9 @@ def route(ctx: Any, request: str) -> Optional[dict]:
         )
         return None
 
-    skills = _roster(ctx)
+    skills = _roster(ctx, settings)
     if not skills:
-        _notify_once(path, "no-roster", "skip", f"no skills found under {roster_dir(ctx)}")
+        _notify_once(path, "no-roster", "skip", f"no skills found under {roster_dir(ctx, settings)}")
         return None
 
     client = _client(ctx, settings)
@@ -404,7 +405,7 @@ def _cli_handler(ctx: Any):
                   f"/ margin {settings['fits_margin']:.2f} / shortlist {settings['shortlist']}")
             print(f"  roster    : {roster_dir(ctx)} — {info['skills']} skills, "
                   f"{info['categories']} categories")
-            print(f"  model     : {settings['model']} @ {settings['base_url'] or 'https://api.typesafe.ai'}")
+            print(f"  model     : {settings['jev_model']} @ {settings['base_url'] or 'https://api.typesafe.ai'}")
             print(f"  api key   : {'present' if api_key_present() else 'MISSING (TYPESAFE_API_KEY)'}")
             print(f"  cache     : {cache_path(ctx)} — {len(cache)} cached answers")
             print(f"  log       : {path}")

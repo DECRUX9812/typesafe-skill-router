@@ -9,9 +9,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
+
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.RLock:
+    key = str(path.resolve())
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 
 def request_key(payload: dict[str, Any]) -> str:
@@ -25,27 +40,31 @@ class JsonCache:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._data: dict[str, Any] = {}
-        self._lock = threading.RLock()  # reentrant: put() holds it across its save() call
+        # Shared per-path lock: parallel pre_llm_call hooks (e.g. subagent fan-out)
+        # construct separate JsonCache instances pointing at the same file.
+        self._lock = _lock_for(self.path)
         self.hits = 0
         self.misses = 0
-        if self.path.exists():
-            try:
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    self._data = loaded
-            except (OSError, json.JSONDecodeError):
-                self._data = {}
+        with self._lock:
+            if self.path.exists():
+                try:
+                    loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        self._data = loaded
+                except (OSError, json.JSONDecodeError):
+                    self._data = {}
 
     def __len__(self) -> int:
         return len(self._data)
 
     def get(self, payload: dict[str, Any]) -> Optional[dict[str, Any]]:
-        hit = self._data.get(request_key(payload))
-        if hit is None:
-            self.misses += 1
-            return None
-        self.hits += 1
-        return hit
+        with self._lock:
+            hit = self._data.get(request_key(payload))
+            if hit is None:
+                self.misses += 1
+                return None
+            self.hits += 1
+            return hit
 
     def put(self, payload: dict[str, Any], response: dict[str, Any]) -> None:
         with self._lock:
@@ -55,6 +74,34 @@ class JsonCache:
     def save(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(json.dumps(self._data, indent=1, sort_keys=True), encoding="utf-8")
-            tmp.replace(self.path)
+            if self.path.exists():
+                try:
+                    on_disk = json.loads(self.path.read_text(encoding="utf-8"))
+                    if isinstance(on_disk, dict):
+                        on_disk.update(self._data)
+                        self._data = on_disk
+                except (OSError, json.JSONDecodeError):
+                    pass
+            tmp = self.path.with_name(
+                f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            try:
+                tmp.write_text(
+                    json.dumps(self._data, indent=1, sort_keys=True), encoding="utf-8"
+                )
+                for attempt in range(6):
+                    try:
+                        tmp.replace(self.path)
+                        return
+                    except PermissionError:
+                        if attempt == 5:
+                            return  # cache persistence is best-effort; never fail a turn
+                        time.sleep(0.01 * (attempt + 1))
+            except OSError:
+                return
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass

@@ -159,10 +159,18 @@ class StubContext:
         self.hooks: Dict[str, Callable] = {}
         self.commands: Dict[str, Any] = {}
 
+    RESERVED_ROOTS = frozenset({"model", "plugins", "security", "settings"})
+
+    def _check_key(self, key: str) -> None:
+        if not key or key.split(".")[0].lower() in self.RESERVED_ROOTS:
+            raise ValueError(f"Rejected config path {key!r}")
+
     def get_config(self, key: str, default: Any = None) -> Any:
+        self._check_key(key)
         return self.settings.get(key, default)
 
     def set_config(self, key: str, value: Any) -> None:
+        self._check_key(key)
         self.settings[key] = value
 
     def register_hook(self, name: str, callback: Callable) -> None:
